@@ -15,6 +15,7 @@ DB_FILE = "users.db"
 COLLEGE_DOMAIN = "mitwpu.edu.in"   # change this if your college email domain is different
 OTP_VALID_SECONDS = 300            # otp works for 5 minutes
 MAX_OTP_TRIES = 3
+DEMO_ACCOUNT_TTL_MINUTES = 10      # demo accounts expire after 10 minutes
 
 
 # ---------- database part ----------
@@ -31,11 +32,35 @@ def init_users_table():
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            created_timestamp REAL DEFAULT 0
         )
     """)
+    # Migration helper: ensure created_timestamp column exists if table already existed
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN created_timestamp REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     conn.commit()
     conn.close()
+
+
+def cleanup_expired_demo_users():
+    """Removes demo accounts created more than DEMO_ACCOUNT_TTL_MINUTES ago."""
+    cutoff = time.time() - (DEMO_ACCOUNT_TTL_MINUTES * 60)
+    conn = get_conn()
+    try:
+        # Delete users whose created_timestamp is older than 10 mins (or missing/0)
+        conn.execute(
+            "DELETE FROM users WHERE created_timestamp > 0 AND created_timestamp < ?",
+            (cutoff,)
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 
 def hash_password(password, salt):
@@ -45,6 +70,7 @@ def hash_password(password, salt):
 
 def find_user(identifier):
     # identifier can be username or email
+    cleanup_expired_demo_users()
     conn = get_conn()
     row = conn.execute(
         "SELECT username, email, password_hash, salt, created_at FROM users "
@@ -56,13 +82,15 @@ def find_user(identifier):
 
 
 def create_user(username, email, password):
+    cleanup_expired_demo_users()
     salt = os.urandom(16).hex()
     pw_hash = hash_password(password, salt)
+    now_ts = time.time()
     conn = get_conn()
     conn.execute(
-        "INSERT INTO users (username, email, password_hash, salt, created_at) "
-        "VALUES (?, ?, ?, ?, date('now'))",
-        (username, email, pw_hash, salt),
+        "INSERT OR REPLACE INTO users (username, email, password_hash, salt, created_at, created_timestamp) "
+        "VALUES (?, ?, ?, ?, date('now'), ?)",
+        (username, email, pw_hash, salt, now_ts),
     )
     conn.commit()
     conn.close()
@@ -228,6 +256,7 @@ def show_otp_step():
 def show_auth_page():
     """First screen of the website. Nothing else loads until the user logs in."""
     init_users_table()
+    cleanup_expired_demo_users()
 
     _, middle, _ = st.columns([1, 2, 1])
     with middle:
@@ -239,6 +268,8 @@ def show_auth_page():
             show_login_tab()
         with signup_tab:
             show_signup_tab()
+
+        st.caption("ℹ️ Demo Mode: Registered accounts automatically reset after 10 minutes for live testing.")
 
 
 def logout():
